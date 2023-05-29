@@ -12,14 +12,12 @@
 #include "sr_rt.h"
 #include "sr_utils.h"
 
-/*---------------------------------------------------------------------
- * Method: sr_init(void)
- * Scope:  Global
- *
- * Initialize the routing subsystem
- *
- *---------------------------------------------------------------------*/
 
+/**
+ * sr_init - Initialize the router instance and set up the ARP cache cleanup thread.
+ *
+ * @sr: The router instance to be initialized.
+ */
 void sr_init(struct sr_instance *sr) {
   /* REQUIRES */
   assert(sr);
@@ -34,11 +32,19 @@ void sr_init(struct sr_instance *sr) {
   pthread_t thread;
 
   pthread_create(&thread, &(sr->attr), sr_arpcache_timeout, sr);
-
-  /* Add initialization code here! */
-
 } /* -- sr_init -- */
 
+
+/**
+ * longest_prefix_match - Perform a longest prefix match on the given IP address 
+ * against the router's routing table. 
+ *
+ * @sr: The router instance.
+ * @ip_dst: The destination IP address for which to find a match.
+ * @match_entry: Pointer to the routing table entry to update if a match is found.
+ *
+ * Returns 1 if the network is reachable, 0 otherwise.
+ */
 int longest_prefix_match(struct sr_instance *sr, uint32_t ip_dst,
                          struct sr_rt **match_entry) {
   int net_reachable = 0;
@@ -58,7 +64,20 @@ int longest_prefix_match(struct sr_instance *sr, uint32_t ip_dst,
   return net_reachable;
 }
 
-/* Helper for sr_handlepacket() to send type 3 ICMP messages. */
+
+/**
+ * send_icmp_msg - Constructs and sends an ICMP message with the specified type 
+ * and code.
+ *
+ * @sr: The router instance.
+ * @packet: The original packet to reply to.
+ * @interface: The interface from which the packet came.
+ * @type: The ICMP type.
+ * @code: The ICMP code.
+ *
+ * Note: This function currently does not handle the error when the sending of the 
+ * packet fails. It needs to be updated to handle this case.
+ */
 void send_icmp_msg(struct sr_instance *sr, uint8_t *packet, char *interface,
                        uint8_t type, uint8_t code) {
 
@@ -118,8 +137,24 @@ void send_icmp_msg(struct sr_instance *sr, uint8_t *packet, char *interface,
   printf("sr_send_packet ret: %d\n", ret);
 }
 
-void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
 
+/**
+ * handle_arpreq - Handles an ARP request. If the request has been sent five times 
+ * without a response, it sends an ICMP host unreachable message for each packet 
+ * waiting on this ARP request. Otherwise, it re-sends the ARP request.
+ *
+ * @sr: The router instance.
+ * @req: The ARP request to handle.
+ *
+ * This function first checks if the ARP request has been sent recently. If it has,
+ * and it's been sent more than 5 times, it sends an ICMP host unreachable message 
+ * for each packet waiting on this request, then destroys the request. If it hasn't 
+ * been sent recently, or it hasn't yet been sent 5 times, it re-sends the ARP request.
+ *
+ * Note: This function does not handle the case where sending the ARP request or the 
+ * ICMP message fails.
+ */
+void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
   struct sr_rt *match_entry;
   longest_prefix_match(sr, req->ip, &match_entry);
   char *fwd_interface = match_entry->interface;
@@ -175,6 +210,25 @@ void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
   }
 }
 
+
+/**
+ * forward_ip_packet - Forwards an IP packet to the destination IP address.
+ *
+ * @sr: The router instance.
+ * @packet: The packet to be forwarded.
+ * @len: The length of the packet.
+ * @ip_dst: The destination IP address.
+ * @fwd_iface: The interface to forward the packet on.
+ *
+ * This function first checks the ARP cache for the MAC address corresponding to the 
+ * destination IP address. If an entry is found (cache hit), it replaces the Ethernet 
+ * header's source and destination addresses with the correct addresses, then sends 
+ * the packet. If no entry is found (cache miss), it queues the ARP request and 
+ * initiates handling the ARP request.
+ *
+ * Note: This function currently does not handle the case where the sending of the 
+ * packet fails. It needs to be updated to handle this case.
+ */
 void forward_ip_packet(struct sr_instance *sr, uint8_t *packet,
                        unsigned int len, uint32_t ip_dst, char *fwd_iface) {
   struct sr_if *forward_iface = sr_get_interface(sr, fwd_iface);
@@ -197,22 +251,27 @@ void forward_ip_packet(struct sr_instance *sr, uint8_t *packet,
   }
 }
 
-/*---------------------------------------------------------------------
- * Method: sr_handlepacket(uint8_t* p,char* interface)
- * Scope:  Global
- *
- * This method is called each time the router receives a packet on the
- * interface.  The packet buffer, the packet length and the receiving
- * interface are passed in as parameters. The packet is complete with
- * ethernet headers.
- *
- * Note: Both the packet buffer and the character's memory are handled
- * by sr_vns_comm.c that means do NOT delete either.  Make a copy of the
- * packet instead if you intend to keep it around beyond the scope of
- * the method call.
- *
- *---------------------------------------------------------------------*/
 
+/**
+ * sr_handlepacket - Handles received packets.
+ *
+ * @sr: The router instance.
+ * @packet: The received packet.
+ * @len: The length of the received packet.
+ * @interface: The interface on which the packet was received.
+ *
+ * This function examines each packet received by the router. If the packet is an ARP 
+ * packet, it processes it accordingly, sending an ARP reply if necessary or updating
+ * the ARP cache. If the packet is an IP packet, it checks if it is intended for the 
+ * router itself, and if so, sends an ICMP echo reply or ICMP port unreachable message 
+ * depending on the protocol. If the packet is not intended for the router, it 
+ * decrements the TTL, checks if the packet can be forwarded, and if so, forwards it, 
+ * otherwise it sends an ICMP network unreachable message. If the TTL reaches zero, it
+ * sends an ICMP time exceeded message.
+ *
+ * Note: This function currently does not handle the case where the sending of the 
+ * packet fails. It needs to be updated to handle this case.
+ */
 void sr_handlepacket(struct sr_instance *sr, uint8_t *packet /* lent */,
                      unsigned int len, char *interface /* lent */) {
   /* REQUIRES */
@@ -398,8 +457,7 @@ void sr_handlepacket(struct sr_instance *sr, uint8_t *packet /* lent */,
        Piazza */
       /*TODO: check min length and checksum */
       if ((ip_header->ip_ttl - 1) == 0 /*TTL reaches 0*/) {
-        /* ICMP Time exceeded. Type 11 Code 0
-         TODO: ask piazza where's type 11 ICMP */
+        /* ICMP Time exceeded. Type 11 Code 0 */
         struct sr_rt *match_entry;
         int net_reachable =
             longest_prefix_match(sr, ip_header->ip_src, &match_entry);
@@ -428,5 +486,4 @@ void sr_handlepacket(struct sr_instance *sr, uint8_t *packet /* lent */,
       }
     }
   }
-
-} /* end sr_ForwardPacket */
+} 
